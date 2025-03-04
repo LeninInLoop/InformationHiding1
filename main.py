@@ -17,7 +17,7 @@ def generate_pseudo_random_image(
 ) -> np.ndarray:
 
     if len(shape) != 2:
-        raise ValueError('Shape must be 2d')
+        raise ValueError('Image array must be two-dimensional')
 
     random_image = np.array(
             127.5 * np.random.randn(*shape) + 127.5,
@@ -33,8 +33,8 @@ def save_image(
 
     if len(image_array.shape) not in (2, 3):
         raise ValueError('Image array must be two or three-dimensional')
-
-    return Image.fromarray(image_array).save(filename)
+    Image.fromarray(image_array).save(filename)
+    return print(50*"-", "\nImage saved as {}".format(filename))
 
 
 def load_image(
@@ -64,7 +64,7 @@ def extract_binary_images(
 ) -> np.ndarray:
 
     if len(image_array.shape) != 3:
-        raise ValueError('Shape must be 3d')
+        raise ValueError('Image array must be three-dimensional')
 
     binary_array = np.zeros(image_array[:, :, channel_index].shape + (8,))
     for bit in range(8):
@@ -113,7 +113,8 @@ def plot_bit_planes(
 
     if filename:
         plt.savefig(filename, dpi=300, bbox_inches='tight')
-    plt.show()
+        return print(50*"-","\nImage saved as {}".format(filename))
+    plt.close()
     return
 
 
@@ -150,19 +151,23 @@ def main():
 
     # plot LSB to MSB of each channel(r, g, b) in resized host data
     channel_configs = [
-        (ImageChannels.RED, 'red_LSB_to_MSB_images.png'),
-        (ImageChannels.GREEN, 'green_LSB_to_MSB_images.png'),
-        (ImageChannels.BLUE, 'blue_LSB_to_MSB_images.png')
+        (ImageChannels.RED, 'red_gray_scale.png' ,'red_LSB_to_MSB_images.png'),
+        (ImageChannels.GREEN, 'green_gray_scale.png' ,'green_LSB_to_MSB_images.png'),
+        (ImageChannels.BLUE, 'blue_gray_scale.png' ,'blue_LSB_to_MSB_images.png')
     ]
 
-    for channel, output_filename in channel_configs:
+    for channel, output_grayscale_filename, output_binary_filename in channel_configs:
+        save_image(
+            resized_host_image[:,:,channel],
+            filename=os.path.join(base_image_path, output_grayscale_filename)
+        )
         binary_images = extract_binary_images(
             image_array=resized_host_image,
             channel_index=channel
         )
         plot_bit_planes(
             binary_array=binary_images,
-            filename=os.path.join(base_image_path, output_filename)
+            filename=os.path.join(base_image_path, output_binary_filename)
         )
 
 
