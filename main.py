@@ -81,7 +81,7 @@ def extract_binary_images(
 def generate_binary_image_from_gray_scale(
         image_array: np.ndarray,
 ) -> np.ndarray:
-    return np.array(Image.fromarray(image_array).convert('1'))
+    return np.where(image_array[:,:,0] > 127, 255, 0).astype(np.bool)
 
 
 def plot_bit_planes(
@@ -135,22 +135,54 @@ def embed_watermark(
     bit_plane: int,
     channel: int
 ) -> np.ndarray:
-    host_copy = host_image.copy()
+    # Validate inputs
+    assert 0 <= bit_plane <= 7, f"Invalid bit plane: {bit_plane}"
+    assert 0 <= channel < host_image.shape[2], f"Invalid channel: {channel}"
+    print(len(pixel_locations), watermark.size)
+    assert len(pixel_locations) == watermark.size, "Pixel locations must match watermark size"
 
-    # Extract the selected channel
+    host_copy = host_image.copy()
     selected_channel = host_copy[:, :, channel]
 
     # Create the bit mask to clear the target bit
     clear_mask = ~(1 << bit_plane) & 0xFF
 
-    for idx, (i, j) in enumerate(pixel_locations):
-        if i < host_image.shape[0] and j < host_image.shape[1]:  # Ensure within bounds
-            pixel_cleared = selected_channel[i, j] & clear_mask  # Clear bit
-            selected_channel[i, j] = pixel_cleared | (watermark.flat[idx] << bit_plane)  # Embed bit
+    print(f"Embedding watermark of shape {watermark.shape}")
+    print(f"Using bit plane {bit_plane} on channel {channel}")
 
-    # Merge the modified channel back into the image
+    embedding_errors = 0
+    for idx, (i, j) in enumerate(pixel_locations):
+        if i < host_image.shape[0] and j < host_image.shape[1]:
+            pixel_cleared = selected_channel[i, j] & clear_mask  # Clear bit
+            watermark_bit = 1 if watermark.flat[idx] > 0 else 0
+            selected_channel[i, j] = pixel_cleared | (watermark_bit << bit_plane)
+        else:
+            embedding_errors += 1
+            print(f"Warning: Pixel location {(i,j)} out of bounds")
+
+    if embedding_errors > 0:
+        print(f"Failed to embed {embedding_errors} pixels")
+
     host_copy[:, :, channel] = selected_channel
     return host_copy
+
+def extract_watermark(
+    watermarked_image: np.ndarray,
+    pixel_locations: List[Tuple[int, int]],
+    bit_plane: int,
+    channel: int,
+    watermark_shape: Tuple[int, int]
+) -> np.ndarray:
+
+    extracted_watermark = np.zeros(watermark_shape, dtype=np.bool)
+
+    selected_channel = watermarked_image[:, :, channel]
+
+    for idx, (i, j) in enumerate(pixel_locations):
+        extracted_watermark.flat[idx] = (selected_channel[i, j] >> bit_plane) & 1 # Extract bit
+
+    return extracted_watermark
+
 
 def plot_watermarked_images(
         base_image_path: str,
@@ -166,12 +198,12 @@ def plot_watermarked_images(
         if image_group == 0:
             # Load the image with SUTECH watermark
             image_channel = image_channel_path.split("SUTECH")[-1]
-            image_path = base_image_path + image_channel + f'_host_image_with_SUTECH_watermark_bit_{bit}.jpg'
+            image_path = base_image_path + image_channel + f'_host_image_with_SUTECH_watermark_bit_{bit}.tiff'
             image = np.array(Image.open(image_path))
         else:
             # Load the image with RANDOM watermark
             image_channel = image_channel_path.split("Random")[-1]
-            image_path = base_image_path + image_channel + f'_host_image_with_RANDOM_watermark_bit_{bit}.jpg'
+            image_path = base_image_path + image_channel + f'_host_image_with_RANDOM_watermark_bit_{bit}.tiff'
             image = np.array(Image.open(image_path))
         axes[row, col].imshow(image)  # Display in grayscale
         axes[row, col].set_title(f'Bit {bit} - SUTECH')
@@ -182,7 +214,6 @@ def plot_watermarked_images(
         plt.savefig(filename)
 
     plt.close()
-
 
 def main():
     base_image_paths = {
@@ -211,7 +242,7 @@ def main():
     )
     save_image(
         pseudo_random_image,
-        filename=os.path.join(base_image_paths['root'],'pseudo_random_image.png')
+        filename=os.path.join(base_image_paths['root'],'pseudo_random_image.tiff')
     )
 
     # Creating the host image, resize and so on.
@@ -227,14 +258,14 @@ def main():
     )
     save_image(
         resized_host_image,
-        filename=os.path.join(base_image_paths['host'],'resized_host_image.png')
+        filename=os.path.join(base_image_paths['host'],'resized_host_image.tiff')
     )
 
     # plot LSB to MSB of each channel(r, g, b) in resized host data
     channel_configs = [
-        (ImageChannels.RED, 'red_gray_scale.png' ,'red_LSB_to_MSB_images.png'),
-        (ImageChannels.GREEN, 'green_gray_scale.png' ,'green_LSB_to_MSB_images.png'),
-        (ImageChannels.BLUE, 'blue_gray_scale.png' ,'blue_LSB_to_MSB_images.png')
+        (ImageChannels.RED, 'red_gray_scale.tiff' ,'red_LSB_to_MSB_images.tiff'),
+        (ImageChannels.GREEN, 'green_gray_scale.tiff' ,'green_LSB_to_MSB_images.tiff'),
+        (ImageChannels.BLUE, 'blue_gray_scale.tiff' ,'blue_LSB_to_MSB_images.tiff')
     ]
 
     for channel, output_grayscale_filename, output_binary_filename in channel_configs:
@@ -262,7 +293,7 @@ def main():
     )
     save_image(
         image_array=binary_watermark,
-        filename=os.path.join(base_image_paths['root'], 'binary_sutech_watermark.jpg')
+        filename=os.path.join(base_image_paths['root'], 'binary_sutech_watermark.tiff')
     )
     print(50 * "-", "\nBinary watermark:\n", binary_watermark)
 
@@ -280,12 +311,13 @@ def main():
         'save_address': "BLUE_host_image_with_"
         }
     }
+
+    # Define fixed locations (a 64x64 block)
+    pixel_locations = [(i, j) for i in range(binary_watermark.shape[0]) for j in range(binary_watermark.shape[1])]
     for bit in range(8):
         for channel, address in channels.items():
 
-            # Define fixed locations (a 64x64 block)
-            pixel_locations = [(i, j) for i in range(binary_watermark.shape[0]) for j in range(binary_watermark.shape[1])]
-
+            print(binary_watermark.shape)
             watermarked_image = embed_watermark(
                 host_image=host_image,
                 watermark=binary_watermark,
@@ -298,7 +330,7 @@ def main():
                 image_array=watermarked_image,
                 filename=os.path.join(
                     base_image_paths['sutech_' + address['base_address']],
-                    address["save_address"] + f'SUTECH_watermark_bit_{bit}.jpg'
+                    address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
                 )
             )
 
@@ -314,7 +346,7 @@ def main():
                 image_array=watermarked_image,
                 filename=os.path.join(
                     base_image_paths['random_' + address['base_address']],
-                    address["save_address"] + f'RANDOM_watermark_bit_{bit}.jpg'
+                    address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
                 )
             )
 
@@ -322,13 +354,30 @@ def main():
         plot_watermarked_images(
             base_image_path=base_image_paths['sutech_' + address['base_address']],
             image_group=WatermarkedImageGroup.SUTECH,
-            filename=os.path.join(base_image_paths['sutech'], address["save_address"] + "SUTECH_watermarks.png")
+            filename=os.path.join(base_image_paths['sutech'], address["save_address"] + "SUTECH_watermarks.tiff")
         )
         plot_watermarked_images(
             base_image_path=base_image_paths['random_' + address['base_address']],
             image_group=WatermarkedImageGroup.RANDOM,
-            filename=os.path.join(base_image_paths['random'], address["save_address"] + "RANDOM_watermarks.png")
+            filename=os.path.join(base_image_paths['random'], address["save_address"] + "RANDOM_watermarks.tiff")
         )
+
+    extracted_watermark = extract_watermark(
+        watermarked_image= np.array(
+            Image.open(
+                "Images/Watermarked Images/SUTECH/BLUE/BLUE_host_image_with_SUTECH_watermark_bit_0.tiff"
+            )
+        ),
+        pixel_locations=pixel_locations,
+        bit_plane=0,
+        channel=ImageChannels.BLUE,
+        watermark_shape=(64, 64)
+    )
+    save_image(
+        image_array=extracted_watermark,
+        filename="Images/test.tiff"
+    )
+
 
 if __name__ == "__main__":
     main()
