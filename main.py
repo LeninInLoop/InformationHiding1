@@ -44,10 +44,10 @@ def generate_pseudo_random_image(shape: tuple, is_binary: bool) -> np.ndarray:
         Numpy array containing the generated image
     """
     if len(shape) != 2:
-        raise ValueError('Image array must be two-dimensional')
+        raise ValueError('shape must be two-dimensional')
 
     random_image = np.array(
-        127.5 * np.random.randn(*shape) + 127.5,
+        255 * np.random.randn(*shape) + 127.5,
         dtype=np.uint8
     )
     return random_image > 127.5 if is_binary else random_image
