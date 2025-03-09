@@ -47,7 +47,7 @@ def generate_pseudo_random_image(shape: tuple, is_binary: bool) -> np.ndarray:
         raise ValueError('shape must be two-dimensional')
 
     random_image = np.array(
-        255 * np.random.randn(*shape) + 127.5,
+        52.05 * np.random.randn(*shape) + 127.5,
         dtype=np.uint8
     )
     return random_image > 127.5 if is_binary else random_image
@@ -63,7 +63,7 @@ def generate_binary_image_from_gray_scale(image_array: np.ndarray) -> np.ndarray
     Returns:
         Binary image as numpy array
     """
-    return np.where(image_array[:, :, 0] > 127, 255, 0).astype(np.bool)
+    return np.array(Image.fromarray(image_array).convert('1'))
 
 
 # File Operations
@@ -159,7 +159,6 @@ def generate_random_pixel_locations(
     """
     # Set random seed for reproducibility
     random.seed(seed)
-    np.random.seed(seed)
 
     height, width = host_image_shape[0], host_image_shape[1]
     
@@ -171,7 +170,7 @@ def generate_random_pixel_locations(
     
     # Randomly select pixels
     random_locations = random.sample(all_pixels, watermark_size)
-    
+
     return random_locations
 
 
@@ -1414,18 +1413,18 @@ def main() -> None:
     """Main function to execute the watermarking process."""
     print(50 * "-", "\n\033[91mInitializing Digital Watermarking System...\033[0m")
 
-    # # Create directory structure
+    # Create directory structure
     base_image_paths = create_directory_structure()
 
-    # # Process host image
+    # Process host image
     host_image = process_host_image(base_image_paths)
 
-    # # Process and embed watermarks
+    # Process and embed watermarks
     binary_watermark, pseudo_random_image, fixed_locations, random_locations_sutech, random_locations_random = (
         process_watermarks(base_image_paths, host_image)
     )
 
-    # # Extract watermarks
+    # Extract watermarks
     extract_watermarks(
         base_image_paths,
         host_image,
