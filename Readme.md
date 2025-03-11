@@ -1,6 +1,6 @@
-# GitHub File Download Guide (Including LFS Files)
+# GitHub File Download Guide
 
-This guide teaches you how to download files from GitHub repositories without using command line tools. It covers regular files, entire repositories, and LFS (Large File Storage) files.
+This guide teaches you how to download files from GitHub repositories without using command line tools. It covers regular files and entire repository.
 
 ## Download an Entire Repository
 
