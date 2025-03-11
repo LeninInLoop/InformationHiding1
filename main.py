@@ -598,10 +598,10 @@ def create_directory_structure() -> dict:
     """
     base_image_paths = {
         "root": os.path.join("Images"),
-        "host": os.path.join("Images", "Host Image"),
+        "host": os.path.join("Images", "Host Image Analysis"),
 
-        "host_gray_scales": os.path.join("Images", "Host Image", "Gray Scale"),
-        "bit_planes": os.path.join("Images", "Host Image", "Bit Planes"),
+        "host_gray_scales": os.path.join("Images", "Host Image Analysis", "Gray Scale"),
+        "bit_planes": os.path.join("Images", "Host Image Analysis", "Bit Planes"),
         "evaluation": os.path.join("Images", "RGB Watermarking", "Evaluation"),
 
         # Algorithm 1 - Fixed Location
@@ -645,13 +645,10 @@ def create_directory_structure() -> dict:
         "gray_fixed_random": os.path.join("Images", "Gray Scale Watermarking", "Fixed Location Algorithm", "Random"),
         # Algorithm 2 - Pseudo Random Location
         "gray_pseudo_random": os.path.join("Images", "Gray Scale Watermarking", "Pseudo Random Location Algorithm"),
-        "gray_pseudo_random_sutech": os.path.join("Images", "Gray Scale Watermarking",
-                                                  "Pseudo Random Location Algorithm", "SUTECH"),
-        "gray_pseudo_random_random": os.path.join("Images", "Gray Scale Watermarking",
-                                                  "Pseudo Random Location Algorithm", "Random"),
+        "gray_pseudo_random_sutech": os.path.join("Images", "Gray Scale Watermarking", "Pseudo Random Location Algorithm", "SUTECH"),
+        "gray_pseudo_random_random": os.path.join("Images", "Gray Scale Watermarking", "Pseudo Random Location Algorithm", "Random"),
         # Location Maps for Random Algorithm
-        "gray_location_maps": os.path.join("Images", "Gray Scale Watermarking", "Pseudo Random Location Algorithm",
-                                           "Location Maps"),
+        "gray_location_maps": os.path.join("Images", "Gray Scale Watermarking", "Pseudo Random Location Algorithm", "Location Maps"),
         # Evaluation path
         "gray_evaluation": os.path.join("Images", "Gray Scale Watermarking", "Evaluation"),
 
