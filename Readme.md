@@ -6,12 +6,11 @@ This guide teaches you how to download files from GitHub repositories without us
 
 To download all files from a GitHub repository:
 
-1. **Navigate to the repository** you want to download.
-2. **Click the green "Code" button** near the top right of the repository page.
+1. **Click the green "Code" button** near the top right of the repository page.
    
   ![Download ZIP option](https://docs.github.com/assets/cb-49892/mw-1440/images/help/repository/code-button.webp)
 
-3. **Select "Download ZIP"** from the dropdown menu.
+2. **Select "Download ZIP"** from the dropdown menu.
 
 Now you have all the repository files on your computer!
 
