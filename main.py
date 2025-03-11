@@ -7,9 +7,11 @@ import warnings
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
+from skimage.metrics import structural_similarity as ssim
 
 # Warnings
-warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
+warnings.simplefilter("ignore", UserWarning)
+
 
 # Constants and Enums
 class ImageChannels:
@@ -32,11 +34,12 @@ class WatermarkAlgorithm:
 
 
 # Image Generation and Manipulation
-def generate_pseudo_random_image(shape: tuple, is_binary: bool) -> np.ndarray:
+def generate_pseudo_random_image(seed: int, shape: tuple, is_binary: bool) -> np.ndarray:
     """
     Generate a pseudo-random image of specified shape.
 
     Args:
+        seed (int): Random seed
         shape: Tuple of (height, width)
         is_binary: If True, return a binary image; otherwise grayscale
 
@@ -46,11 +49,21 @@ def generate_pseudo_random_image(shape: tuple, is_binary: bool) -> np.ndarray:
     if len(shape) != 2:
         raise ValueError('shape must be two-dimensional')
 
-    random_image = np.array(
-        52.05 * np.random.randn(*shape) + 127.5,
+    np.random.seed(seed)
+
+    # Generate random values between 0 and 255
+    random_image = np.random.randint(
+        low=0,
+        high=255,
+        size=shape,
         dtype=np.uint8
     )
-    return random_image > 127.5 if is_binary else random_image
+
+    # Convert to binary if requested
+    if is_binary:
+        random_image = (random_image > 127.5)
+
+    return random_image
 
 
 def generate_binary_image_from_gray_scale(image_array: np.ndarray) -> np.ndarray:
@@ -118,24 +131,38 @@ def resize_image(image_array: np.ndarray, target_dimensions: tuple[int, int]) ->
     return np.array(Image.fromarray(image_array).resize(target_dimensions))
 
 
+def convert_image_to_gray_scale(image_array: np.ndarray) -> np.ndarray:
+    if len(image_array.shape) != 3:
+        raise ValueError('Image array must be three-dimensional')
+    return np.array(Image.fromarray(image_array).convert('L'))
+
+
 # Bit Plane Operations
-def extract_binary_images(image_array: np.ndarray, channel_index: int) -> np.ndarray:
+def extract_binary_images(image_array: np.ndarray, channel_index: int = 0, is_gray_scale: bool = False) -> np.ndarray:
     """
     Extract bit planes from a specific channel of an image.
 
     Args:
         image_array: 3D array representing an image
         channel_index: Index of the channel to extract from
-
+        is_gray_scale: if host image is gray scale
     Returns:
         3D array of bit planes
     """
-    if len(image_array.shape) != 3:
-        raise ValueError('Image array must be three-dimensional')
 
-    binary_array = np.zeros(image_array[:, :, channel_index].shape + (8,))
-    for bit in range(8):
-        binary_array[:, :, bit] = np.bitwise_and(image_array[:, :, channel_index], 2 ** bit) > 0
+    if not is_gray_scale:
+        if len(image_array.shape) != 3:
+            raise ValueError('Image array must be three-dimensional')
+
+        binary_array = np.zeros(image_array[:, :, channel_index].shape + (8,))
+        for bit in range(8):
+            binary_array[:, :, bit] = np.bitwise_and(image_array[:, :, channel_index], 2 ** bit) > 0
+    else:
+        if len(image_array.shape) != 2:
+            raise ValueError('Image array must be two-dimensional')
+        binary_array = np.zeros(image_array.shape + (8,))
+        for bit in range(8):
+            binary_array[:, :, bit] = np.bitwise_and(image_array, 2 ** bit) > 0
 
     return np.array(binary_array, dtype=np.bool)
 
@@ -161,13 +188,13 @@ def generate_random_pixel_locations(
     random.seed(seed)
 
     height, width = host_image_shape[0], host_image_shape[1]
-    
+
     # Generate unique random locations
     all_pixels = [(i, j) for i in range(height) for j in range(width)]
-    
+
     if watermark_size > len(all_pixels):
         raise ValueError("Watermark size exceeds available pixels in host image")
-    
+
     # Randomly select pixels
     random_locations = random.sample(all_pixels, watermark_size)
 
@@ -180,7 +207,8 @@ def embed_watermark(
         watermark: np.ndarray,
         pixel_locations: List[Tuple[int, int]],
         bit_plane: int,
-        channel: int
+        channel: int,
+        is_gray_scale: bool = False
 ) -> np.ndarray:
     """
     Embed watermark into host image.
@@ -195,8 +223,12 @@ def embed_watermark(
     Returns:
         Watermarked image as numpy array
     """
-    host_copy = host_image.copy()
-    selected_channel = host_copy[:, :, channel]
+    if not is_gray_scale:
+        host_copy = host_image.copy()
+        selected_channel = host_copy[:, :, channel]
+    else:
+        host_copy = host_image.copy()
+        selected_channel = host_copy
 
     # Create the bit mask to clear the target bit
     clear_mask = ~(1 << bit_plane) & 0xFF
@@ -206,7 +238,9 @@ def embed_watermark(
             pixel_cleared = selected_channel[i, j] & clear_mask  # Clear bit
             selected_channel[i, j] = pixel_cleared | (watermark.flat[idx] << bit_plane)
 
-    host_copy[:, :, channel] = selected_channel
+    if not is_gray_scale:
+        host_copy[:, :, channel] = selected_channel
+
     return host_copy
 
 
@@ -215,7 +249,8 @@ def extract_watermark(
         pixel_locations: List[Tuple[int, int]],
         bit_plane: int,
         channel: int,
-        watermark_shape: Tuple[int, int]
+        watermark_shape: Tuple[int, int],
+        is_gray_scale: bool = False
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract watermark from watermarked image.
@@ -226,6 +261,7 @@ def extract_watermark(
         bit_plane: Bit plane containing watermark (0-7)
         channel: Color channel containing watermark
         watermark_shape: Shape of watermark to extract
+        is_gray_scale: If host image is grayscale
 
     Returns:
         Tuple of (extracted watermark, cleaned image)
@@ -233,7 +269,10 @@ def extract_watermark(
     clean_image = watermarked_image.copy()
     extracted_watermark = np.zeros(watermark_shape, dtype=np.bool)
 
-    selected_channel = watermarked_image[:, :, channel]
+    if not is_gray_scale:
+        selected_channel = watermarked_image[:, :, channel]
+    else:
+        selected_channel = watermarked_image
 
     for idx, (i, j) in enumerate(pixel_locations):
         if idx < extracted_watermark.size:
@@ -242,7 +281,10 @@ def extract_watermark(
     mask = 0xFF ^ (1 << bit_plane)  # Create mask with 0 at the bit_plane position
     for i, j in pixel_locations:
         if i < clean_image.shape[0] and j < clean_image.shape[1]:
-            clean_image[i, j, channel] &= mask  # Clear the bit at bit_plane
+            if not is_gray_scale:
+                clean_image[i, j, channel] &= mask  # Clear the bit at bit_plane
+            else:
+                clean_image[i, j] &= mask
 
     return extracted_watermark, clean_image
 
@@ -258,7 +300,7 @@ def save_location_map(pixel_locations: List[Tuple[int, int]], filename: str) -> 
     """
     # Ensure directory exists
     os.makedirs(os.path.dirname(filename), exist_ok=True)
-    
+
     # Convert to numpy array for efficient storage
     location_array = np.array(pixel_locations)
     np.save(filename, location_array)
@@ -277,7 +319,7 @@ def load_location_map(filename: str) -> List[Tuple[int, int]]:
     """
     if not os.path.isfile(filename):
         raise ValueError('Specified location map file does not exist')
-    
+
     location_array = np.load(filename)
     return [(int(row), int(col)) for row, col in location_array]
 
@@ -332,7 +374,7 @@ def plot_bit_planes(binary_array: np.ndarray, filename: Optional[str] = None) ->
     plt.close()
 
 
-def plot_watermarked_images(base_image_path: str, image_group: int, filename: str) -> None:
+def plot_watermarked_images(base_image_path: str, image_group: int, filename: str, is_gray_scale: bool = False) -> None:
     """
     Plot watermarked images from all bit planes.
 
@@ -340,25 +382,37 @@ def plot_watermarked_images(base_image_path: str, image_group: int, filename: st
         base_image_path: Base path to watermarked images
         image_group: Type of watermark (SUTECH or RANDOM)
         filename: Path to save the plot
+        is_gray_scale: if host image is gray scale
     """
     fig, axes = plt.subplots(2, 4, figsize=(15, 8))
 
-    image_channel_path = base_image_path.split(r"/")[-1]
     for bit in range(8):
         row, col = divmod(bit, 4)  # Arrange in 2 rows, 4 columns
 
-        if image_group == WatermarkedImageGroup.SUTECH:
-            # Load the image with SUTECH watermark
-            image_channel = image_channel_path.split("SUTECH")[-1]
-            image_path = base_image_path + image_channel + f'_host_image_with_SUTECH_watermark_bit_{bit}.tiff'
+        if is_gray_scale:
+            if image_group == WatermarkedImageGroup.SUTECH:
+                # Load the image with SUTECH watermark
+                image_path = os.path.join(base_image_path, f'SUTECH_watermark_bit_{bit}.tiff')
+            else:
+                # Load the image with RANDOM watermark
+                image_path = os.path.join(base_image_path, f'RANDOM_watermark_bit_{bit}.tiff')
         else:
-            # Load the image with RANDOM watermark
-            image_channel = image_channel_path.split("Random")[-1]
-            image_path = base_image_path + image_channel + f'_host_image_with_RANDOM_watermark_bit_{bit}.tiff'
+            image_channel_path = base_image_path.split(r"/")[-1]
+            if image_group == WatermarkedImageGroup.SUTECH:
+                # Load the image with SUTECH watermark
+                image_channel = image_channel_path.split("SUTECH")[-1]
+                image_path = base_image_path + image_channel + f'_host_image_with_SUTECH_watermark_bit_{bit}.tiff'
+            else:
+                # Load the image with RANDOM watermark
+                image_channel = image_channel_path.split("Random")[-1]
+                image_path = base_image_path + image_channel + f'_host_image_with_RANDOM_watermark_bit_{bit}.tiff'
 
         if os.path.exists(image_path):
             image = np.array(Image.open(image_path))
-            axes[row, col].imshow(image)
+            if is_gray_scale:
+                axes[row, col].imshow(image, cmap='gray')
+            else:
+                axes[row, col].imshow(image)
             axes[row, col].set_title(f'Bit {bit} - {"SUTECH" if image_group == 0 else "RANDOM"}')
             axes[row, col].axis('off')
 
@@ -376,7 +430,8 @@ def plot_watermarked_and_clear_images(
         watermarked_image: np.ndarray,
         clean_image: np.ndarray,
         watermark: np.ndarray,
-        filename: str
+        filename: str,
+        is_gray_scale: bool = False
 ) -> None:
     """
     Create a comparison plot of watermarked image, extracted watermark, and clean image.
@@ -418,7 +473,10 @@ def plot_watermarked_and_clear_images(
         ax.tick_params(axis='both', which='both', length=0, colors='black')
 
     # Display watermarked image with improved contrast if needed
-    ax1.imshow(watermarked_image)
+    if is_gray_scale:
+        ax1.imshow(watermarked_image, cmap='gray')
+    else:
+        ax1.imshow(watermarked_image)
     ax1.set_title('Watermarked Image', color='black', fontweight='bold', pad=20)
     ax1.axis('off')
 
@@ -440,7 +498,10 @@ def plot_watermarked_and_clear_images(
     ax2.add_patch(rect)
 
     # Display clean image
-    ax3.imshow(clean_image)
+    if is_gray_scale:
+        ax3.imshow(clean_image, cmap='gray')
+    else:
+        ax3.imshow(clean_image)
     ax3.set_title('Clean Image', color='black', fontweight='bold', pad=20)
     ax3.axis('off')
 
@@ -477,7 +538,7 @@ def plot_watermarked_and_clear_images(
 def visualize_random_locations(
         host_image: np.ndarray,
         pixel_locations: List[Tuple[int, int]],
-        filename: str
+        filename: str,
 ) -> None:
     """
     Create a visualization of random pixel locations used for watermark embedding.
@@ -487,8 +548,6 @@ def visualize_random_locations(
         pixel_locations: List of (row, col) coordinates used for embedding
         filename: Path to save the visualization
     """
-    # Create a copy of the host image
-    visualization = host_image.copy()
 
     # Create a mask image with the same dimensions
     mask = np.zeros(host_image.shape[:2], dtype=np.bool)
@@ -498,18 +557,9 @@ def visualize_random_locations(
         if i < host_image.shape[0] and j < host_image.shape[1]:
             mask[i, j] = True
 
-    # Create a highlighted visualization
-    # Make a translucent red overlay for the random pixels
-    for c in range(3):
-        channel = visualization[:, :, c]
-        if c == 0:  # Red channel
-            channel[mask] = np.minimum(channel[mask] + 100, 255)  # Brighten red
-        else:  # Green and Blue channels
-            channel[mask] = np.maximum(channel[mask] - 50, 0)  # Darken others
-
     # Set up the figure
     plt.figure(figsize=(10, 10))
-    plt.imshow(visualization)
+    plt.imshow(mask)
     plt.title('Random Watermark Embedding Locations', fontsize=16)
     plt.axis('off')
 
@@ -548,31 +598,63 @@ def create_directory_structure() -> dict:
     """
     base_image_paths = {
         "root": os.path.join("Images"),
-        "evaluation": os.path.join("Images", "Evaluation"),
         "host": os.path.join("Images", "Host Image"),
+
+        "host_gray_scales": os.path.join("Images", "Host Image", "Gray Scale"),
         "bit_planes": os.path.join("Images", "Host Image", "Bit Planes"),
+        "evaluation": os.path.join("Images", "RGB Watermarking", "Evaluation"),
+
         # Algorithm 1 - Fixed Location
-        "fixed_location": os.path.join("Images", "Fixed Location Algorithm"),
-        "fixed_random": os.path.join("Images", "Fixed Location Algorithm", "Random"),
-        "fixed_random_red": os.path.join("Images", "Fixed Location Algorithm", "Random", "RED"),
-        "fixed_random_green": os.path.join("Images", "Fixed Location Algorithm", "Random", "GREEN"),
-        "fixed_random_blue": os.path.join("Images", "Fixed Location Algorithm", "Random", "BLUE"),
-        "fixed_sutech": os.path.join("Images", "Fixed Location Algorithm", "SUTECH"),
-        "fixed_sutech_red": os.path.join("Images", "Fixed Location Algorithm", "SUTECH", "RED"),
-        "fixed_sutech_green": os.path.join("Images", "Fixed Location Algorithm", "SUTECH", "GREEN"),
-        "fixed_sutech_blue": os.path.join("Images", "Fixed Location Algorithm", "SUTECH", "BLUE"),
+        "fixed_location": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm"),
+        "fixed_random": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm", "Random"),
+        "fixed_random_red": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm", "Random", "RED"),
+        "fixed_random_green": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm", "Random", "GREEN"),
+        "fixed_random_blue": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm", "Random", "BLUE"),
+        "fixed_sutech": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm", "SUTECH"),
+        "fixed_sutech_red": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm", "SUTECH", "RED"),
+        "fixed_sutech_green": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm", "SUTECH", "GREEN"),
+        "fixed_sutech_blue": os.path.join("Images", "RGB Watermarking", "Fixed Location Algorithm", "SUTECH", "BLUE"),
         # Algorithm 2 - Pseudo Random Location
-        "pseudo_random": os.path.join("Images", "Pseudo Random Location Algorithm"),
-        "pseudo_random_random": os.path.join("Images", "Pseudo Random Location Algorithm", "Random"),
-        "pseudo_random_random_red": os.path.join("Images", "Pseudo Random Location Algorithm", "Random", "RED"),
-        "pseudo_random_random_green": os.path.join("Images", "Pseudo Random Location Algorithm", "Random", "GREEN"),
-        "pseudo_random_random_blue": os.path.join("Images", "Pseudo Random Location Algorithm", "Random", "BLUE"),
-        "pseudo_random_sutech": os.path.join("Images", "Pseudo Random Location Algorithm", "SUTECH"),
-        "pseudo_random_sutech_red": os.path.join("Images", "Pseudo Random Location Algorithm", "SUTECH", "RED"),
-        "pseudo_random_sutech_green": os.path.join("Images", "Pseudo Random Location Algorithm", "SUTECH", "GREEN"),
-        "pseudo_random_sutech_blue": os.path.join("Images", "Pseudo Random Location Algorithm", "SUTECH", "BLUE"),
+        "pseudo_random": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm"),
+        "pseudo_random_random": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                             "Random"),
+        "pseudo_random_random_red": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                                 "Random", "RED"),
+        "pseudo_random_random_green": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                                   "Random", "GREEN"),
+        "pseudo_random_random_blue": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                                  "Random", "BLUE"),
+        "pseudo_random_sutech": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                             "SUTECH"),
+        "pseudo_random_sutech_red": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                                 "SUTECH", "RED"),
+        "pseudo_random_sutech_green": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                                   "SUTECH", "GREEN"),
+        "pseudo_random_sutech_blue": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                                  "SUTECH", "BLUE"),
         # Location Maps for Random Algorithm
-        "location_maps": os.path.join("Images", "Pseudo Random Location Algorithm" ,"Location Maps"),
+        "location_maps": os.path.join("Images", "RGB Watermarking", "Pseudo Random Location Algorithm",
+                                      "Location Maps"),
+
+        # Gray Scaled Host Image Analysis
+
+        "gray_analysis": os.path.join("Images", "Gray Scale Watermarking"),
+        # Algorithm 1 - Fixed Location
+        "gray_fixed_location": os.path.join("Images", "Gray Scale Watermarking", "Fixed Location Algorithm"),
+        "gray_fixed_sutech": os.path.join("Images", "Gray Scale Watermarking", "Fixed Location Algorithm", "SUTECH"),
+        "gray_fixed_random": os.path.join("Images", "Gray Scale Watermarking", "Fixed Location Algorithm", "Random"),
+        # Algorithm 2 - Pseudo Random Location
+        "gray_pseudo_random": os.path.join("Images", "Gray Scale Watermarking", "Pseudo Random Location Algorithm"),
+        "gray_pseudo_random_sutech": os.path.join("Images", "Gray Scale Watermarking",
+                                                  "Pseudo Random Location Algorithm", "SUTECH"),
+        "gray_pseudo_random_random": os.path.join("Images", "Gray Scale Watermarking",
+                                                  "Pseudo Random Location Algorithm", "Random"),
+        # Location Maps for Random Algorithm
+        "gray_location_maps": os.path.join("Images", "Gray Scale Watermarking", "Pseudo Random Location Algorithm",
+                                           "Location Maps"),
+        # Evaluation path
+        "gray_evaluation": os.path.join("Images", "Gray Scale Watermarking", "Evaluation"),
+
     }
 
     # Ensure all directories exist
@@ -625,7 +707,7 @@ def process_host_image(base_image_paths: dict) -> np.ndarray:
         # Save grayscale channel
         save_image(
             resized_host_image[:, :, channel],
-            filename=os.path.join(base_image_paths['host'], output_grayscale_filename)
+            filename=os.path.join(base_image_paths["host_gray_scales"], output_grayscale_filename)
         )
 
         # Extract and plot bit planes
@@ -635,22 +717,36 @@ def process_host_image(base_image_paths: dict) -> np.ndarray:
             filename=os.path.join(base_image_paths['bit_planes'], output_binary_filename)
         )
 
-    return resized_host_image
+    gray_scale_host_image = convert_image_to_gray_scale(
+        image_array=resized_host_image
+    )
+    save_image(
+        gray_scale_host_image,
+        filename=os.path.join(base_image_paths['host'], 'converted_gray_scale.tiff')
+    )
+
+    binary_images = extract_binary_images(gray_scale_host_image, is_gray_scale=True)
+    plot_bit_planes(
+        binary_array=binary_images,
+        filename=os.path.join(base_image_paths['bit_planes'], "converted_gray_scale_bit_plane.tiff")
+    )
+
+    return resized_host_image, gray_scale_host_image
 
 
-def process_watermarks(base_image_paths: dict, host_image: np.ndarray) -> tuple:
+def process_watermarks(base_image_paths: dict, host_image: np.ndarray, is_gray_scale: bool) -> tuple:
     """
     Process and embed watermarks into the host image.
 
     Args:
         base_image_paths: Dictionary of directory paths
         host_image: Host image to embed watermarks into
-
+        is_gray_scale: if host image is grayscale
     Returns:
         Tuple of (binary_watermark, pseudo_random_image, fixed_locations, random_locations_sutech, random_locations_random)
     """
     # Create pseudo-random watermark
-    pseudo_random_image = generate_pseudo_random_image(shape=(64, 64), is_binary=True)
+    pseudo_random_image = generate_pseudo_random_image(seed=45, shape=(64, 64), is_binary=True)
     save_image(
         pseudo_random_image,
         filename=os.path.join(base_image_paths['root'], 'pseudo_random_image.tiff')
@@ -681,7 +777,7 @@ def process_watermarks(base_image_paths: dict, host_image: np.ndarray) -> tuple:
         pixel_locations=random_locations_sutech,
         filename=os.path.join(base_image_paths['location_maps'], 'sutech_random_locations.npy')
     )
-    
+
     # Generate random locations for RANDOM watermark (for Algorithm 2)
     random_locations_random = generate_random_pixel_locations(
         host_image_shape=host_image.shape,
@@ -693,32 +789,151 @@ def process_watermarks(base_image_paths: dict, host_image: np.ndarray) -> tuple:
         pixel_locations=random_locations_random,
         filename=os.path.join(base_image_paths['location_maps'], 'random_random_locations.npy')
     )
-    
-    # Visualize the random locations
-    visualize_random_locations(
-        host_image=host_image,
-        pixel_locations=random_locations_sutech,
-        filename=os.path.join(base_image_paths['location_maps'], 'sutech_random_locations_visualization.png')
-    )
-    visualize_random_locations(
-        host_image=host_image,
-        pixel_locations=random_locations_random,
-        filename=os.path.join(base_image_paths['location_maps'], 'random_random_locations_visualization.png')
-    )
 
-    # Channel configurations
-    channels = {
-        ImageChannels.RED: {'base_address': "red", 'save_address': "RED_host_image_with_"},
-        ImageChannels.GREEN: {'base_address': "green", 'save_address': "GREEN_host_image_with_"},
-        ImageChannels.BLUE: {'base_address': "blue", 'save_address': "BLUE_host_image_with_"}
-    }
+    if not is_gray_scale:
 
-    # -------------------- Algorithm 1: Fixed Location Embedding --------------------
-    print(50 * "-", "\n\033[91mRunning Algorithm 1: Fixed Location Embedding...\033[0m")
-    
-    # Embed watermarks in each bit plane and channel
-    for bit in range(8):
-        for channel, address in channels.items():
+        # Visualize the random locations
+        visualize_random_locations(
+            host_image=host_image,
+            pixel_locations=random_locations_sutech,
+            filename=os.path.join(base_image_paths['location_maps'], 'sutech_random_locations_visualization.png'),
+        )
+        visualize_random_locations(
+            host_image=host_image,
+            pixel_locations=random_locations_random,
+            filename=os.path.join(base_image_paths['location_maps'], 'random_random_locations_visualization.png'),
+        )
+
+        # Channel configurations
+        channels = {
+            ImageChannels.RED: {'base_address': "red", 'save_address': "RED_host_image_with_"},
+            ImageChannels.GREEN: {'base_address': "green", 'save_address': "GREEN_host_image_with_"},
+            ImageChannels.BLUE: {'base_address': "blue", 'save_address': "BLUE_host_image_with_"}
+        }
+
+        # -------------------- Algorithm 1: Fixed Location Embedding --------------------
+        print(50 * "-", "\n\033[91m [RGB] Running Algorithm 1: Fixed Location Embedding...\033[0m")
+
+        # Embed watermarks in each bit plane and channel
+        for bit in range(8):
+            for channel, address in channels.items():
+                # Embed SUTECH watermark
+                watermarked_image = embed_watermark(
+                    host_image=host_image,
+                    watermark=binary_watermark,
+                    pixel_locations=fixed_locations,
+                    bit_plane=bit,
+                    channel=channel,
+                )
+                save_image(
+                    image_array=watermarked_image,
+                    filename=os.path.join(
+                        base_image_paths['fixed_sutech_' + address['base_address']],
+                        address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
+                    )
+                )
+
+                # Embed RANDOM watermark
+                watermarked_image = embed_watermark(
+                    host_image=host_image,
+                    watermark=pseudo_random_image,
+                    pixel_locations=fixed_locations,
+                    bit_plane=bit,
+                    channel=channel
+                )
+                save_image(
+                    image_array=watermarked_image,
+                    filename=os.path.join(
+                        base_image_paths['fixed_random_' + address['base_address']],
+                        address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
+                    )
+                )
+
+            # Generate summary plots for each channel
+            for address in channels.values():
+                plot_watermarked_images(
+                    base_image_path=base_image_paths['fixed_sutech_' + address['base_address']],
+                    image_group=WatermarkedImageGroup.SUTECH,
+                    filename=os.path.join(base_image_paths['fixed_sutech'],
+                                          address["save_address"] + "SUTECH_watermarks.tiff")
+                )
+                plot_watermarked_images(
+                    base_image_path=base_image_paths['fixed_random_' + address['base_address']],
+                    image_group=WatermarkedImageGroup.RANDOM,
+                    filename=os.path.join(base_image_paths['fixed_random'],
+                                          address["save_address"] + "RANDOM_watermarks.tiff")
+                )
+
+        # -------------------- Algorithm 2: Pseudo-Random Location Embedding --------------------
+        print(50 * "-", "\n\033[91m [RGB] Running Algorithm 2: Pseudo-Random Location Embedding...\033[0m")
+
+        # Embed watermarks in each bit plane and channel with random locations
+        for bit in range(8):
+            for channel, address in channels.items():
+                # Embed SUTECH watermark with random locations
+                watermarked_image = embed_watermark(
+                    host_image=host_image,
+                    watermark=binary_watermark,
+                    pixel_locations=random_locations_sutech,
+                    bit_plane=bit,
+                    channel=channel,
+                )
+                save_image(
+                    image_array=watermarked_image,
+                    filename=os.path.join(
+                        base_image_paths['pseudo_random_sutech_' + address['base_address']],
+                        address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
+                    )
+                )
+                # Embed RANDOM watermark
+                watermarked_image = embed_watermark(
+                    host_image=host_image,
+                    watermark=pseudo_random_image,
+                    pixel_locations=random_locations_random,
+                    bit_plane=bit,
+                    channel=channel
+                )
+                save_image(
+                    image_array=watermarked_image,
+                    filename=os.path.join(
+                        base_image_paths['pseudo_random_random_' + address['base_address']],
+                        address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
+                    )
+                )
+            # Generate summary plots for each channel with random locations
+            for address in channels.values():
+                plot_watermarked_images(
+                    base_image_path=base_image_paths['pseudo_random_sutech_' + address['base_address']],
+                    image_group=WatermarkedImageGroup.SUTECH,
+                    filename=os.path.join(base_image_paths['pseudo_random_sutech'],
+                                          address["save_address"] + "SUTECH_watermarks.tiff")
+                )
+                plot_watermarked_images(
+                    base_image_path=base_image_paths['pseudo_random_random_' + address['base_address']],
+                    image_group=WatermarkedImageGroup.RANDOM,
+                    filename=os.path.join(base_image_paths['pseudo_random_random'],
+                                          address["save_address"] + "RANDOM_watermarks.tiff")
+                )
+
+    if is_gray_scale:
+        # Visualize the random locations
+        visualize_random_locations(
+            host_image=host_image,
+            pixel_locations=random_locations_sutech,
+            filename=os.path.join(base_image_paths['gray_location_maps'], 'sutech_random_locations_visualization.png'),
+        )
+        visualize_random_locations(
+            host_image=host_image,
+            pixel_locations=random_locations_random,
+            filename=os.path.join(base_image_paths['gray_location_maps'], 'random_random_locations_visualization.png'),
+        )
+
+        # -------------------- Algorithm 1: Fixed Location Embedding --------------------
+        print(50 * "-", "\n\033[91m [GRAY SCALE] Running Algorithm 1: Fixed Location Embedding...\033[0m")
+
+        channel = 0
+        # Embed watermarks in each bit plane and channel
+        for bit in range(8):
             # Embed SUTECH watermark
             watermarked_image = embed_watermark(
                 host_image=host_image,
@@ -726,12 +941,13 @@ def process_watermarks(base_image_paths: dict, host_image: np.ndarray) -> tuple:
                 pixel_locations=fixed_locations,
                 bit_plane=bit,
                 channel=channel,
+                is_gray_scale=is_gray_scale
             )
             save_image(
                 image_array=watermarked_image,
                 filename=os.path.join(
-                    base_image_paths['fixed_sutech_' + address['base_address']],
-                    address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
+                    base_image_paths['gray_fixed_sutech'],
+                    f'SUTECH_watermark_bit_{bit}.tiff'
                 )
             )
 
@@ -741,35 +957,35 @@ def process_watermarks(base_image_paths: dict, host_image: np.ndarray) -> tuple:
                 watermark=pseudo_random_image,
                 pixel_locations=fixed_locations,
                 bit_plane=bit,
-                channel=channel
+                channel=channel,
+                is_gray_scale=is_gray_scale
             )
             save_image(
                 image_array=watermarked_image,
                 filename=os.path.join(
-                    base_image_paths['fixed_random_' + address['base_address']],
-                    address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
+                    base_image_paths['gray_fixed_random'],
+                    f'RANDOM_watermark_bit_{bit}.tiff'
                 )
             )
 
-        # Generate summary plots for each channel
-        for address in channels.values():
-            plot_watermarked_images(
-                base_image_path=base_image_paths['fixed_sutech_' + address['base_address']],
-                image_group=WatermarkedImageGroup.SUTECH,
-                filename=os.path.join(base_image_paths['fixed_sutech'], address["save_address"] + "SUTECH_watermarks.tiff")
-            )
-            plot_watermarked_images(
-                base_image_path=base_image_paths['fixed_random_' + address['base_address']],
-                image_group=WatermarkedImageGroup.RANDOM,
-                filename=os.path.join(base_image_paths['fixed_random'], address["save_address"] + "RANDOM_watermarks.tiff")
-            )
+        plot_watermarked_images(
+            base_image_path=base_image_paths['gray_fixed_sutech'],
+            image_group=WatermarkedImageGroup.SUTECH,
+            filename=os.path.join(base_image_paths['gray_fixed_sutech'], "SUTECH_watermarks.tiff"),
+            is_gray_scale=is_gray_scale
+        )
+        plot_watermarked_images(
+            base_image_path=base_image_paths['gray_fixed_random'],
+            image_group=WatermarkedImageGroup.RANDOM,
+            filename=os.path.join(base_image_paths['gray_fixed_random'], "RANDOM_watermarks.tiff"),
+            is_gray_scale=is_gray_scale
+        )
 
-    # -------------------- Algorithm 2: Pseudo-Random Location Embedding --------------------
-    print(50 * "-", "\n\033[91mRunning Algorithm 2: Pseudo-Random Location Embedding...\033[0m")
-    
-    # Embed watermarks in each bit plane and channel with random locations
-    for bit in range(8):
-        for channel, address in channels.items():
+        # -------------------- Algorithm 2: Pseudo-Random Location Embedding --------------------
+        print(50 * "-", "\n\033[91m [GRAY SCALE] Running Algorithm 2: Pseudo-Random Location Embedding...\033[0m")
+
+        # Embed watermarks in each bit plane and channel with random locations
+        for bit in range(8):
             # Embed SUTECH watermark with random locations
             watermarked_image = embed_watermark(
                 host_image=host_image,
@@ -777,12 +993,12 @@ def process_watermarks(base_image_paths: dict, host_image: np.ndarray) -> tuple:
                 pixel_locations=random_locations_sutech,
                 bit_plane=bit,
                 channel=channel,
+                is_gray_scale=is_gray_scale
             )
             save_image(
                 image_array=watermarked_image,
                 filename=os.path.join(
-                    base_image_paths['pseudo_random_sutech_' + address['base_address']],
-                    address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
+                    base_image_paths['gray_pseudo_random_sutech'], f'SUTECH_watermark_bit_{bit}.tiff'
                 )
             )
             # Embed RANDOM watermark
@@ -791,29 +1007,28 @@ def process_watermarks(base_image_paths: dict, host_image: np.ndarray) -> tuple:
                 watermark=pseudo_random_image,
                 pixel_locations=random_locations_random,
                 bit_plane=bit,
-                channel=channel
+                channel=channel,
+                is_gray_scale=is_gray_scale
             )
             save_image(
                 image_array=watermarked_image,
                 filename=os.path.join(
-                    base_image_paths['pseudo_random_random_' + address['base_address']],
-                    address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
+                    base_image_paths['gray_pseudo_random_random'], f'RANDOM_watermark_bit_{bit}.tiff'
                 )
             )
-        # Generate summary plots for each channel with random locations
-        for address in channels.values():
-            plot_watermarked_images(
-                base_image_path=base_image_paths['pseudo_random_sutech_' + address['base_address']],
-                image_group=WatermarkedImageGroup.SUTECH,
-                filename=os.path.join(base_image_paths['pseudo_random_sutech'],
-                                      address["save_address"] + "SUTECH_watermarks.tiff")
-            )
-            plot_watermarked_images(
-                base_image_path=base_image_paths['pseudo_random_random_' + address['base_address']],
-                image_group=WatermarkedImageGroup.RANDOM,
-                filename=os.path.join(base_image_paths['pseudo_random_random'],
-                                      address["save_address"] + "RANDOM_watermarks.tiff")
-            )
+
+        plot_watermarked_images(
+            base_image_path=base_image_paths['gray_pseudo_random_sutech'],
+            image_group=WatermarkedImageGroup.SUTECH,
+            filename=os.path.join(base_image_paths['gray_pseudo_random_sutech'], "SUTECH_watermarks.tiff"),
+            is_gray_scale=is_gray_scale
+        )
+        plot_watermarked_images(
+            base_image_path=base_image_paths['gray_pseudo_random_random'],
+            image_group=WatermarkedImageGroup.RANDOM,
+            filename=os.path.join(base_image_paths['gray_pseudo_random_random'], "RANDOM_watermarks.tiff"),
+            is_gray_scale=is_gray_scale
+        )
 
     return binary_watermark, pseudo_random_image, fixed_locations, random_locations_sutech, random_locations_random
 
@@ -825,7 +1040,8 @@ def extract_watermarks(
         pseudo_random_image: np.ndarray,
         fixed_locations: List[Tuple[int, int]],
         random_locations_sutech: List[Tuple[int, int]],
-        random_locations_random: List[Tuple[int, int]]
+        random_locations_random: List[Tuple[int, int]],
+        is_gray_scale: bool = False
 ) -> None:
     """
     Extract and visualize watermarks from watermarked images.
@@ -838,23 +1054,210 @@ def extract_watermarks(
         fixed_locations: Fixed pixel locations for Algorithm 1
         random_locations_sutech: Random pixel locations for SUTECH watermark
         random_locations_random: Random pixel locations for random watermark
+        is_gray_scale: if host image is gray scale
     """
-    # Channel configurations
-    channels = {
-        ImageChannels.RED: {'base_address': "red", 'save_address': "RED_host_image_with_"},
-        ImageChannels.GREEN: {'base_address': "green", 'save_address': "GREEN_host_image_with_"},
-        ImageChannels.BLUE: {'base_address': "blue", 'save_address': "BLUE_host_image_with_"}
-    }
 
-    # -------------------- Algorithm 1: Extract Fixed Location Watermarks --------------------
-    print(50 * "-", "\n\033[91mExtracting Algorithm 1: Fixed Location Watermarks...\033[0m")
+    if not is_gray_scale:
+        # Channel configurations
+        channels = {
+            ImageChannels.RED: {'base_address': "red", 'save_address': "RED_host_image_with_"},
+            ImageChannels.GREEN: {'base_address': "green", 'save_address': "GREEN_host_image_with_"},
+            ImageChannels.BLUE: {'base_address': "blue", 'save_address': "BLUE_host_image_with_"}
+        }
 
-    for bit in range(8):
-        for channel, address in channels.items():
+        # -------------------- Algorithm 1: Extract Fixed Location Watermarks --------------------
+        print(50 * "-", "\n\033[91mExtracting Algorithm 1: Fixed Location Watermarks...\033[0m")
+
+        for bit in range(8):
+            for channel, address in channels.items():
+                # Extract SUTECH watermark
+                watermarked_image_path = os.path.join(
+                    base_image_paths['fixed_sutech_' + address['base_address']],
+                    address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
+                )
+
+                if os.path.exists(watermarked_image_path):
+                    watermarked_image = load_image(watermarked_image_path)
+
+                    extracted_watermark, clean_image = extract_watermark(
+                        watermarked_image=watermarked_image,
+                        pixel_locations=fixed_locations,
+                        bit_plane=bit,
+                        channel=channel,
+                        watermark_shape=binary_watermark.shape
+                    )
+
+                    # Save and visualize the extracted watermark
+                    save_image(
+                        image_array=extracted_watermark,
+                        filename=os.path.join(
+                            base_image_paths['fixed_sutech'], 'Extracted', address['base_address'].upper(),
+                            f'extracted_SUTECH_watermark_bit_{bit}.tiff'
+                        )
+                    )
+                    save_image(
+                        image_array=clean_image,
+                        filename=os.path.join(
+                            base_image_paths['fixed_sutech'], 'Extracted', address['base_address'].upper(),
+                            f'extracted_SUTECH_clean_image_bit_{bit}.tiff'
+                        )
+                    )
+                    # Create comparison visualization
+                    plot_watermarked_and_clear_images(
+                        watermarked_image=watermarked_image,
+                        clean_image=clean_image,
+                        watermark=extracted_watermark,
+                        filename=os.path.join(
+                            base_image_paths['fixed_sutech'], 'Extracted', address['base_address'].upper(),
+                            f'comparison_SUTECH_bit_{bit}.png'
+                        )
+                    )
+
+                # Extract RANDOM watermark
+                watermarked_image_path = os.path.join(
+                    base_image_paths['fixed_random_' + address['base_address']],
+                    address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
+                )
+
+                if os.path.exists(watermarked_image_path):
+                    watermarked_image = load_image(watermarked_image_path)
+
+                    extracted_watermark, clean_image = extract_watermark(
+                        watermarked_image=watermarked_image,
+                        pixel_locations=fixed_locations,
+                        bit_plane=bit,
+                        channel=channel,
+                        watermark_shape=pseudo_random_image.shape
+                    )
+
+                    # # Save and visualize the extracted watermark
+                    save_image(
+                        image_array=extracted_watermark,
+                        filename=os.path.join(
+                            base_image_paths['fixed_random'], 'Extracted', address['base_address'].upper(),
+                            f'extracted_RANDOM_watermark_bit_{bit}.tiff'
+                        )
+                    )
+                    save_image(
+                        image_array=clean_image,
+                        filename=os.path.join(
+                            base_image_paths['fixed_random'], 'Extracted', address['base_address'].upper(),
+                            f'extracted_RANDOM_clean_image_bit_{bit}.tiff'
+                        )
+                    )
+                    # Create comparison visualization
+                    plot_watermarked_and_clear_images(
+                        watermarked_image=watermarked_image,
+                        clean_image=clean_image,
+                        watermark=extracted_watermark,
+                        filename=os.path.join(
+                            base_image_paths['fixed_random'], 'Extracted', address['base_address'].upper(),
+                            f'comparison_RANDOM_bit_{bit}.png'
+                        )
+                    )
+
+        # -------------------- Algorithm 2: Extract Pseudo-Random Location Watermarks --------------------
+        print(50 * "-", "\n\033[91mExtracting Algorithm 2: Pseudo-Random Location Watermarks...\033[0m")
+
+        for bit in range(8):
+            for channel, address in channels.items():
+                # Extract SUTECH watermark with random locations
+                watermarked_image_path = os.path.join(
+                    base_image_paths['pseudo_random_sutech_' + address['base_address']],
+                    address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
+                )
+
+                if os.path.exists(watermarked_image_path):
+                    watermarked_image = load_image(watermarked_image_path)
+
+                    extracted_watermark, clean_image = extract_watermark(
+                        watermarked_image=watermarked_image,
+                        pixel_locations=random_locations_sutech,
+                        bit_plane=bit,
+                        channel=channel,
+                        watermark_shape=binary_watermark.shape
+                    )
+
+                    # # Save and visualize the extracted watermark
+                    save_image(
+                        image_array=extracted_watermark,
+                        filename=os.path.join(
+                            base_image_paths['pseudo_random_sutech'], 'Extracted', address['base_address'].upper(),
+                            f'extracted_SUTECH_watermark_bit_{bit}.tiff'
+                        )
+                    )
+                    save_image(
+                        image_array=clean_image,
+                        filename=os.path.join(
+                            base_image_paths['pseudo_random_sutech'], 'Extracted', address['base_address'].upper(),
+                            f'extracted_SUTECH_clean_image_bit_{bit}.tiff'
+                        )
+                    )
+                    # Create comparison visualization
+                    plot_watermarked_and_clear_images(
+                        watermarked_image=watermarked_image,
+                        clean_image=clean_image,
+                        watermark=extracted_watermark,
+                        filename=os.path.join(
+                            base_image_paths['pseudo_random_sutech'], 'Extracted', address['base_address'].upper(),
+                            f'comparison_SUTECH_bit_{bit}.png'
+                        )
+                    )
+
+                # Extract RANDOM watermark with random locations
+                watermarked_image_path = os.path.join(
+                    base_image_paths['pseudo_random_random_' + address['base_address']],
+                    address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
+                )
+
+                if os.path.exists(watermarked_image_path):
+                    watermarked_image = load_image(watermarked_image_path)
+
+                    extracted_watermark, clean_image = extract_watermark(
+                        watermarked_image=watermarked_image,
+                        pixel_locations=random_locations_random,
+                        bit_plane=bit,
+                        channel=channel,
+                        watermark_shape=pseudo_random_image.shape
+                    )
+
+                    # Save and visualize the extracted watermark
+                    save_image(
+                        image_array=extracted_watermark,
+                        filename=os.path.join(
+                            base_image_paths['pseudo_random_random'], 'Extracted', address['base_address'].upper(),
+                            f'extracted_RANDOM_watermark_bit_{bit}.tiff'
+                        )
+                    )
+
+                    save_image(
+                        image_array=clean_image,
+                        filename=os.path.join(
+                            base_image_paths['pseudo_random_random'], 'Extracted', address['base_address'].upper(),
+                            f'extracted_RANDOM_clean_image_bit_{bit}.tiff'
+                        )
+                    )
+
+                    # Create comparison visualization
+                    plot_watermarked_and_clear_images(
+                        watermarked_image=watermarked_image,
+                        clean_image=clean_image,
+                        watermark=extracted_watermark,
+                        filename=os.path.join(
+                            base_image_paths['pseudo_random_random'], 'Extracted', address['base_address'].upper(),
+                            f'comparison_RANDOM_bit_{bit}.png'
+                        )
+                    )
+    if is_gray_scale:
+
+        # -------------------- Algorithm 1: Extract Fixed Location Watermarks --------------------
+        print(50 * "-", "\n\033[91m [GRAY SCALE] Extracting Algorithm 1: Fixed Location Watermarks...\033[0m")
+
+        channel = 0
+        for bit in range(8):
             # Extract SUTECH watermark
             watermarked_image_path = os.path.join(
-                base_image_paths['fixed_sutech_' + address['base_address']],
-                address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
+                base_image_paths['gray_fixed_sutech'], f'SUTECH_watermark_bit_{bit}.tiff'
             )
 
             if os.path.exists(watermarked_image_path):
@@ -865,21 +1268,21 @@ def extract_watermarks(
                     pixel_locations=fixed_locations,
                     bit_plane=bit,
                     channel=channel,
-                    watermark_shape=binary_watermark.shape
+                    watermark_shape=binary_watermark.shape,
+                    is_gray_scale=is_gray_scale
                 )
 
                 # Save and visualize the extracted watermark
                 save_image(
                     image_array=extracted_watermark,
                     filename=os.path.join(
-                        base_image_paths['fixed_sutech'], 'Extracted', address['base_address'].upper(),
-                        f'extracted_SUTECH_watermark_bit_{bit}.tiff'
+                        base_image_paths['gray_fixed_sutech'], 'Extracted', f'extracted_SUTECH_watermark_bit_{bit}.tiff'
                     )
                 )
                 save_image(
                     image_array=clean_image,
                     filename=os.path.join(
-                        base_image_paths['fixed_sutech'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_fixed_sutech'], 'Extracted',
                         f'extracted_SUTECH_clean_image_bit_{bit}.tiff'
                     )
                 )
@@ -889,15 +1292,16 @@ def extract_watermarks(
                     clean_image=clean_image,
                     watermark=extracted_watermark,
                     filename=os.path.join(
-                        base_image_paths['fixed_sutech'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_fixed_sutech'], 'Extracted',
                         f'comparison_SUTECH_bit_{bit}.png'
-                    )
+                    ),
+                    is_gray_scale=is_gray_scale
                 )
 
             # Extract RANDOM watermark
             watermarked_image_path = os.path.join(
-                base_image_paths['fixed_random_' + address['base_address']],
-                address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
+                base_image_paths['gray_fixed_random'],
+                f'RANDOM_watermark_bit_{bit}.tiff'
             )
 
             if os.path.exists(watermarked_image_path):
@@ -908,21 +1312,22 @@ def extract_watermarks(
                     pixel_locations=fixed_locations,
                     bit_plane=bit,
                     channel=channel,
-                    watermark_shape=pseudo_random_image.shape
+                    watermark_shape=pseudo_random_image.shape,
+                    is_gray_scale=is_gray_scale
                 )
 
                 # # Save and visualize the extracted watermark
                 save_image(
                     image_array=extracted_watermark,
                     filename=os.path.join(
-                        base_image_paths['fixed_random'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_fixed_random'], 'Extracted',
                         f'extracted_RANDOM_watermark_bit_{bit}.tiff'
                     )
                 )
                 save_image(
                     image_array=clean_image,
                     filename=os.path.join(
-                        base_image_paths['fixed_random'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_fixed_random'], 'Extracted',
                         f'extracted_RANDOM_clean_image_bit_{bit}.tiff'
                     )
                 )
@@ -932,20 +1337,21 @@ def extract_watermarks(
                     clean_image=clean_image,
                     watermark=extracted_watermark,
                     filename=os.path.join(
-                        base_image_paths['fixed_random'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_fixed_random'], 'Extracted',
                         f'comparison_RANDOM_bit_{bit}.png'
-                    )
+                    ),
+                    is_gray_scale=is_gray_scale
                 )
 
-    # -------------------- Algorithm 2: Extract Pseudo-Random Location Watermarks --------------------
-    print(50 * "-", "\n\033[91mExtracting Algorithm 2: Pseudo-Random Location Watermarks...\033[0m")
+        # -------------------- Algorithm 2: Extract Pseudo-Random Location Watermarks --------------------
+        print(50 * "-", "\n\033[91mExtracting Algorithm 2: Pseudo-Random Location Watermarks...\033[0m")
 
-    for bit in range(8):
-        for channel, address in channels.items():
+        for bit in range(8):
+
             # Extract SUTECH watermark with random locations
             watermarked_image_path = os.path.join(
-                base_image_paths['pseudo_random_sutech_' + address['base_address']],
-                address["save_address"] + f'SUTECH_watermark_bit_{bit}.tiff'
+                base_image_paths['gray_pseudo_random_sutech'],
+                f'SUTECH_watermark_bit_{bit}.tiff'
             )
 
             if os.path.exists(watermarked_image_path):
@@ -956,21 +1362,22 @@ def extract_watermarks(
                     pixel_locations=random_locations_sutech,
                     bit_plane=bit,
                     channel=channel,
-                    watermark_shape=binary_watermark.shape
+                    watermark_shape=binary_watermark.shape,
+                    is_gray_scale=is_gray_scale
                 )
 
                 # # Save and visualize the extracted watermark
                 save_image(
                     image_array=extracted_watermark,
                     filename=os.path.join(
-                        base_image_paths['pseudo_random_sutech'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_pseudo_random_sutech'], 'Extracted',
                         f'extracted_SUTECH_watermark_bit_{bit}.tiff'
                     )
                 )
                 save_image(
                     image_array=clean_image,
                     filename=os.path.join(
-                        base_image_paths['pseudo_random_sutech'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_pseudo_random_sutech'], 'Extracted',
                         f'extracted_SUTECH_clean_image_bit_{bit}.tiff'
                     )
                 )
@@ -980,15 +1387,16 @@ def extract_watermarks(
                     clean_image=clean_image,
                     watermark=extracted_watermark,
                     filename=os.path.join(
-                        base_image_paths['pseudo_random_sutech'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_pseudo_random_sutech'], 'Extracted',
                         f'comparison_SUTECH_bit_{bit}.png'
-                    )
+                    ),
+                    is_gray_scale=is_gray_scale
                 )
 
             # Extract RANDOM watermark with random locations
             watermarked_image_path = os.path.join(
-                base_image_paths['pseudo_random_random_' + address['base_address']],
-                address["save_address"] + f'RANDOM_watermark_bit_{bit}.tiff'
+                base_image_paths['gray_pseudo_random_random'],
+                f'RANDOM_watermark_bit_{bit}.tiff'
             )
 
             if os.path.exists(watermarked_image_path):
@@ -999,14 +1407,15 @@ def extract_watermarks(
                     pixel_locations=random_locations_random,
                     bit_plane=bit,
                     channel=channel,
-                    watermark_shape=pseudo_random_image.shape
+                    watermark_shape=pseudo_random_image.shape,
+                    is_gray_scale=is_gray_scale
                 )
 
                 # Save and visualize the extracted watermark
                 save_image(
                     image_array=extracted_watermark,
                     filename=os.path.join(
-                        base_image_paths['pseudo_random_random'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_pseudo_random_random'], 'Extracted',
                         f'extracted_RANDOM_watermark_bit_{bit}.tiff'
                     )
                 )
@@ -1014,7 +1423,7 @@ def extract_watermarks(
                 save_image(
                     image_array=clean_image,
                     filename=os.path.join(
-                        base_image_paths['pseudo_random_random'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_pseudo_random_random'], 'Extracted',
                         f'extracted_RANDOM_clean_image_bit_{bit}.tiff'
                     )
                 )
@@ -1025,16 +1434,18 @@ def extract_watermarks(
                     clean_image=clean_image,
                     watermark=extracted_watermark,
                     filename=os.path.join(
-                        base_image_paths['pseudo_random_random'], 'Extracted', address['base_address'].upper(),
+                        base_image_paths['gray_pseudo_random_random'], 'Extracted',
                         f'comparison_RANDOM_bit_{bit}.png'
-                    )
+                    ),
+                    is_gray_scale=is_gray_scale
                 )
 
 
 def evaluate_watermarks(
         base_image_paths: dict,
         binary_watermark: np.ndarray,
-        pseudo_random_image: np.ndarray
+        pseudo_random_image: np.ndarray,
+        is_gray_scale: bool = False
 ) -> None:
     """
     Evaluate watermarking effectiveness by analyzing extraction results.
@@ -1043,9 +1454,10 @@ def evaluate_watermarks(
         base_image_paths: Dictionary of directory paths
         binary_watermark: SUTECH binary watermark
         pseudo_random_image: Random binary watermark
+        is_gray_scale: if host image is gray scale
     """
     # Define channels and bits to evaluate
-    channels = ['RED', 'GREEN', 'BLUE']
+    channels = ['RED', 'GREEN', 'BLUE'] if not is_gray_scale else ['Gray Scale']
     bits = range(8)  # LSB, middle bit, MSB
 
     # Create figure and subplots
@@ -1079,13 +1491,25 @@ def evaluate_watermarks(
             # Process each channel and bit combination
             for channel in channels:
                 for bit in bits:
-                    # Define path to extracted watermark
-                    extracted_path = os.path.join(
-                        base_image_paths[f'{algorithm}_{watermark_type}'],
-                        'Extracted',
-                        channel,
-                        f'extracted_{"SUTECH" if watermark_type == "sutech" else "RANDOM"}_watermark_bit_{bit}.tiff'
-                    )
+                    # Define path to extracted watermark based on grayscale status
+                    path_key = f"{'gray_' if is_gray_scale else ''}{algorithm}_{watermark_type}"
+
+                    if not is_gray_scale:
+                        # For grayscale, use the simpler format
+                        extracted_path = os.path.join(
+                            base_image_paths[path_key],
+                            'Extracted',
+                            channel,
+                            f"{'SUTECH' if watermark_type == 'sutech' else 'RANDOM'}_watermark_bit_{bit}.tiff"
+                        )
+                    else:
+                        # For RGB, use the original format with nested directory structure
+                        extracted_path = os.path.join(
+                            base_image_paths[path_key],
+                            'Extracted',
+                            f"extracted_{'SUTECH' if watermark_type == 'sutech' else 'RANDOM'}_watermark_bit_{bit}.tiff"
+                        )
+                        print(extracted_path)
 
                     # Check if file exists before attempting to load
                     if os.path.exists(extracted_path):
@@ -1147,7 +1571,8 @@ def evaluate_watermarks(
     plt.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.1, wspace=0.3, hspace=0.3)
 
     # Save figure
-    output_path = os.path.join(base_image_paths['evaluation'], 'watermark_evaluation.png')
+    output_path = os.path.join(base_image_paths['evaluation' if not is_gray_scale else 'gray_evaluation'],
+                               'watermark_evaluation.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -1157,30 +1582,69 @@ def evaluate_watermarks(
 def evaluate_host_image(
         base_image_paths: dict,
         host_image: np.ndarray,
+        is_gray_scale: bool = False
 ) -> None:
     """
     Evaluate and plot the comparison between host images and clean images after watermark extraction.
     Uses both PSNR (Peak Signal-to-Noise Ratio) and SSIM (Structural Similarity Index) as quality metrics.
 
     Args:
-        base_image_paths: Dictionary of directory paths
-        host_image: Original host image
+        base_image_paths: Dictionary of directory paths.
+        host_image: Original host image (RGB or grayscale).
+        is_gray_scale: Set to True if working with a grayscale host image, else False for RGB.
     """
-    # Import SSIM
-    from skimage.metrics import structural_similarity as ssim
 
-    # Define channels and bits to evaluate
-    channels = ['RED', 'GREEN', 'BLUE']
-    bits = range(8)
-
-    # Algorithm and watermark types
+    # ---------------------------------------------------------------------
+    # 1. Define the sets of algorithms, watermark types, and bit-planes
+    # ---------------------------------------------------------------------
+    # We keep the same logical names ("fixed", "pseudo_random") for both
+    # color and grayscale, but switch actual path keys depending on is_gray_scale.
     algorithms = ['fixed', 'pseudo_random']
     watermark_types = ['sutech', 'random']
+    bits = range(8)
 
-    # Create figures with subplots - one for PSNR and one for SSIM
+    # For color images, we have multiple channels; for grayscale, we skip them.
+    channels = ['RED', 'GREEN', 'BLUE'] if not is_gray_scale else [None]
+
+    # ---------------------------------------------------------------------
+    # 2. Helper functions to build the correct path key and filename
+    # ---------------------------------------------------------------------
+    def get_path_key(algorithm: str, watermark_type: str, channel: str) -> str:
+        """
+        Returns the appropriate key in base_image_paths based on whether
+        we're working in grayscale or color mode.
+        """
+        if is_gray_scale:
+            # e.g. "gray_fixed_sutech", "gray_pseudo_random_random"
+            # 'fixed' -> 'gray_fixed', 'pseudo_random' -> 'gray_pseudo_random'
+            alg_prefix = 'gray_fixed' if algorithm == 'fixed' else 'gray_pseudo_random'
+            return f"{alg_prefix}_{watermark_type}"
+        else:
+            # e.g. "fixed_sutech_red", "pseudo_random_random_blue"
+            return f"{algorithm}_{watermark_type}_{channel.lower()}"
+
+    def get_file_name(watermark_type: str, channel: str, bit: int, is_gray_scale: bool) -> str:
+        """
+        Returns the correct watermarked file name for each channel/bit in either
+        grayscale or RGB mode.
+
+        Example outputs:
+            - Grayscale: "RANDOM_watermark_bit_5.tiff"
+            - RGB: "RED_host_image_with_RANDOM_watermark_bit_5.tiff"
+        """
+        if is_gray_scale:
+            # For grayscale: e.g. "RANDOM_watermark_bit_5.tiff"
+            return f"{watermark_type.upper()}_watermark_bit_{bit}.tiff"
+        else:
+            # For RGB: e.g. "RED_host_image_with_RANDOM_watermark_bit_5.tiff"
+            return f"{channel}_host_image_with_{watermark_type.upper()}_watermark_bit_{bit}.tiff"
+
+    # ---------------------------------------------------------------------
+    # 3. Create a figure to hold 2x2 subplots: (Alg vs Watermark Type)
+    # ---------------------------------------------------------------------
     fig_metrics, axs_metrics = plt.subplots(2, 2, figsize=(18, 12))
 
-    # Titles for the grid
+    # Titles for the 2x2 grid
     subplot_titles = [
         'Fixed Location - SUTECH Watermark',
         'Fixed Location - Random Watermark',
@@ -1188,77 +1652,80 @@ def evaluate_host_image(
         'Random Location - Random Watermark'
     ]
 
-    # Set titles for the grid
     for i, title in enumerate(subplot_titles):
-        row, col = i // 2, i % 2
+        row, col = divmod(i, 2)
         axs_metrics[row, col].set_title(title)
 
-    # Track if we have any data across all plots
     global_has_data = False
 
-    # Process each algorithm and watermark type
+    # ---------------------------------------------------------------------
+    # 4. Process each (algorithm, watermark_type) pair
+    # ---------------------------------------------------------------------
     for alg_idx, algorithm in enumerate(algorithms):
         for wm_idx, watermark_type in enumerate(watermark_types):
-            # Dictionary to store channel data for plotting
-            channel_data = {channel: {'bits': [], 'psnr': [], 'ssim': []} for channel in channels}
 
-            # Process each channel and bit combination
+            # Prepare a dictionary to store PSNR/SSIM results for each channel
+            # If grayscale, there's only one "channel": None.
+            channel_data = {}
+            for ch in channels:
+                channel_data[ch] = {'bits': [], 'psnr': [], 'ssim': []}
+
+            # -----------------------------------------------------------------
+            # 4a. Loop over channels (if RGB) or single channel=None (if gray)
+            # -----------------------------------------------------------------
             for channel in channels:
+                # -----------------------------------------------------------------
+                # 4b. Loop over each bit-plane
+                # -----------------------------------------------------------------
                 for bit in bits:
-                    watermarked_image_path = os.path.join(
-                        base_image_paths[f'{algorithm}_{watermark_type}_{channel.lower()}'],
-                        f"{channel}_host_image_with_{'SUTECH' if watermark_type == 'sutech' else 'RANDOM'}_watermark_bit_{bit}.tiff"
-                    )
+                    path_key = get_path_key(algorithm, watermark_type, channel)
+                    file_name = get_file_name(watermark_type, channel, bit, is_gray_scale)
 
-                    # Check if file exists before attempting to load
+                    watermarked_image_path = os.path.join(base_image_paths[path_key], file_name)
+
+                    # Check if file exists
                     if os.path.exists(watermarked_image_path):
-                        # Load images
                         watermarked_image = load_image(watermarked_image_path)
 
-                        # Calculate PSNR between watermarked and original host
-                        mse = np.mean((watermarked_image.astype(float) - host_image.astype(float)) ** 2)
-                        psnr = 10 * np.log10(255.0 ** 2 / mse) if mse > 0 else float('inf')
+                        # Compute MSE, then PSNR
+                        mse = np.mean((watermarked_image.astype(float) -
+                                       host_image.astype(float)) ** 2)
+                        psnr_value = 10 * np.log10(255.0 ** 2 / mse) if mse > 0 else float('inf')
 
-                        # Calculate SSIM between watermarked and original host
-                        # For multi-channel images, calculate SSIM for the specific channel
-                        if len(host_image.shape) > 2 and host_image.shape[2] >= 3:
-                            # Get channel index
+                        # Compute SSIM
+                        # For RGB images, if we have 3 channels, we only compare the specific channel
+                        if (not is_gray_scale) and (len(host_image.shape) == 3) and (host_image.shape[2] >= 3):
+                            # e.g. channel_idx = {'RED': 0, 'GREEN': 1, 'BLUE': 2}[channel]
                             channel_idx = {'RED': 0, 'GREEN': 1, 'BLUE': 2}.get(channel, 0)
-
-                            # Extract the specific channel
                             host_channel = host_image[:, :, channel_idx]
                             watermarked_channel = watermarked_image[:, :, channel_idx]
-
-                            # Calculate SSIM for this channel
                             ssim_value = ssim(host_channel, watermarked_channel, data_range=255)
                         else:
-                            # For grayscale images or other formats
+                            # Grayscale or single-channel comparison
                             ssim_value = ssim(host_image, watermarked_image, data_range=255)
 
-                        # Store the data for plotting
+                        # Store for plotting
                         channel_data[channel]['bits'].append(bit)
-                        channel_data[channel]['psnr'].append(psnr)
+                        channel_data[channel]['psnr'].append(psnr_value)
                         channel_data[channel]['ssim'].append(ssim_value)
 
-            # Get axis for current subplot
+            # -----------------------------------------------------------------
+            # 4c. Plot the PSNR/SSIM curves for this (algorithm, watermark_type)
+            # -----------------------------------------------------------------
             ax = axs_metrics[alg_idx, wm_idx]
+            ax2 = ax.twinx()  # second y-axis for SSIM
 
-            # Create a second y-axis for SSIM
-            ax2 = ax.twinx()
-
-            # Plot the results for each channel
             has_data = False
             for channel in channels:
                 bits_list = channel_data[channel]['bits']
                 psnr_values = channel_data[channel]['psnr']
                 ssim_values = channel_data[channel]['ssim']
 
-                # Set color based on channel
                 if len(bits_list) > 0:
                     has_data = True
                     global_has_data = True
 
-                    # Match color to channel name
+                    # Choose a color if RGB. If grayscale, just pick a default.
                     if channel == 'RED':
                         color = 'red'
                     elif channel == 'GREEN':
@@ -1266,47 +1733,50 @@ def evaluate_host_image(
                     elif channel == 'BLUE':
                         color = 'blue'
                     else:
-                        color = None  # Default matplotlib color
+                        color = 'blue'  # For grayscale or unknown channel
 
-                    # Plot PSNR on left y-axis
-                    ax.plot(bits_list, psnr_values, marker='o', linestyle='-',
-                                     color=color, label=f"{channel} (PSNR)", linewidth=2)
+                    # Plot PSNR (solid line)
+                    ax.plot(bits_list, psnr_values,
+                            marker='o', linestyle='-', color=color,
+                            label=f"{channel or 'Gray Scale'} (PSNR)", linewidth=2)
 
-                    # Plot SSIM on right y-axis with dashed line
-                    ax2.plot(bits_list, ssim_values, marker='s', linestyle='--',
-                                      color=color, label=f"{channel} (SSIM)", linewidth=2)
+                    # Plot SSIM (dashed line)
+                    ax2.plot(bits_list, ssim_values,
+                             marker='s', linestyle='--', color=color,
+                             label=f"{channel or 'Gray Scale'} (SSIM)", linewidth=2)
 
-            # Set axis labels and formatting
+            # -----------------------------------------------------------------
+            # 4d. Final subplot formatting
+            # -----------------------------------------------------------------
             ax.set_xlabel('Bit Plane')
             ax.set_ylabel('PSNR (dB)')
             ax2.set_ylabel('SSIM')
 
-            # Set y-limits
             if has_data:
-                ax.set_ylim(bottom=20)  # PSNR values less than 20dB typically indicate poor quality
-                ax2.set_ylim(0, 1.05)  # SSIM ranges from 0 to 1
+                # Some sensible y-limits
+                ax.set_ylim(bottom=20)  # PSNR below ~20dB is quite poor
+                ax2.set_ylim(0, 1.05)  # SSIM range [0, 1]
 
-                # Create combined legend for both axes
+                # Combine legend
                 lines1, labels1 = ax.get_legend_handles_labels()
                 lines2, labels2 = ax2.get_legend_handles_labels()
                 ax.legend(lines1 + lines2, labels1 + labels2, loc='lower left')
             else:
-                ax.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax.transAxes)
+                ax.text(0.5, 0.5, 'No data available',
+                        ha='center', va='center', transform=ax.transAxes)
 
-            # Add grid
             ax.grid(True, linestyle='--', alpha=0.7)
-
-            # Set x-ticks to only show the bit values we're using
             ax.set_xticks(bits)
 
-    # Add a main title
+    # ---------------------------------------------------------------------
+    # 5. Global figure title, layout, and saving
+    # ---------------------------------------------------------------------
     fig_metrics.suptitle('Host Image Quality Analysis (PSNR & SSIM)', fontsize=16, y=0.98)
-
-    # Adjust layout without using tight_layout
     plt.subplots_adjust(left=0.1, right=0.9, top=0.9, bottom=0.1, wspace=0.3, hspace=0.3)
 
-    # Save figure
-    output_path = os.path.join(base_image_paths['evaluation'], 'host_image_quality_evaluation.png')
+    # Decide output directory based on is_gray_scale
+    output_dir = base_image_paths['gray_evaluation'] if is_gray_scale else base_image_paths['evaluation']
+    output_path = os.path.join(output_dir, 'host_image_quality_evaluation.png')
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -1314,99 +1784,6 @@ def evaluate_host_image(
         print(f"{50 * '-'}\n\033[91mHost image quality evaluation saved to {output_path}\033[0m")
     else:
         print(f"{50 * '-'}\n\033[91mNo data available for quality evaluation. Check paths and file names.\033[0m")
-
-    create_visual_comparison(base_image_paths, host_image, algorithms, watermark_types, channels)
-    return
-
-
-def create_visual_comparison(base_image_paths, host_image, algorithms, watermark_types, channels):
-    """
-    Create visual comparison between host image and clean images for selected bit planes.
-
-    Args:
-        base_image_paths: Dictionary of directory paths
-        host_image: Original host image
-        algorithms: List of algorithms used
-        watermark_types: List of watermark types
-        channels: List of color channels
-    """
-    # Choose representative bit planes (e.g., 0 for LSB, 4 for middle, 7 for MSB)
-    representative_bits = range(8)
-
-    # For each algorithm and watermark type, create a visual comparison
-    for algorithm in algorithms:
-        for watermark_type in watermark_types:
-            for channel in channels:
-                # Create a figure for this combination
-                fig, axs = plt.subplots(2, len(representative_bits) + 1, figsize=(20, 8))
-
-                # Set the title
-                fig.suptitle(f'{algorithm.title().replace("_"," ")} Location - {watermark_type.upper()} Watermark - {channel} Channel',
-                             fontsize=16, y=0.98)
-
-                # Plot original host image in the first column
-                axs[0, 0].imshow(host_image.astype(np.uint8))
-                axs[0, 0].set_title('Original Host Image', fontsize=12)
-                axs[0, 0].axis('off')
-
-                # Calculate difference map for host image (will be all zeros)
-                diff_host = np.zeros_like(host_image.astype(np.uint8))
-                axs[1, 0].imshow(diff_host, cmap='viridis')
-                axs[1, 0].set_title('Reference', fontsize=12)
-                axs[1, 0].axis('off')
-
-                # For each representative bit, get the clean image and plot
-                for i, bit in enumerate(representative_bits):
-                    clean_image_path = os.path.join(
-                        base_image_paths[f'{algorithm}_{watermark_type}'],
-                        'Extracted',
-                        channel,
-                        f'extracted_{"SUTECH" if watermark_type == "sutech" else "RANDOM"}_clean_image_bit_{bit}.tiff'
-                    )
-
-                    if os.path.exists(clean_image_path):
-                        # Load clean image
-                        clean_image = load_image(clean_image_path)
-
-                        # Plot clean image
-                        axs[0, i + 1].imshow(clean_image)
-                        axs[0, i + 1].set_title(f'Clean Image (Bit {bit})', fontsize=12)
-                        axs[0, i + 1].axis('off')
-
-                        # Calculate and plot difference map
-                        diff_image = np.abs(host_image.astype(float) - clean_image.astype(float))
-                        # Normalize for better visualization
-                        if np.max(diff_image) > 0:
-                            diff_image = diff_image / np.max(diff_image) * 255
-
-                        diff_image = diff_image.astype(np.uint8)
-                        axs[1, i + 1].imshow(diff_image, cmap='viridis')
-                        axs[1, i + 1].set_title(f'Difference Map (Bit {bit})', fontsize=12)
-                        axs[1, i + 1].axis('off')
-                    else:
-                        # If image doesn't exist, show placeholders
-                        axs[0, i + 1].text(0.5, 0.5, 'Image not available',
-                                           ha='center', va='center', transform=axs[0, i + 1].transAxes)
-                        axs[0, i + 1].set_title(f'Clean Image (Bit {bit})')
-                        axs[0, i + 1].axis('off')
-
-                        axs[1, i + 1].text(0.5, 0.5, 'Difference not available',
-                                           ha='center', va='center', transform=axs[1, i + 1].transAxes)
-                        axs[1, i + 1].set_title(f'Difference Map (Bit {bit})')
-                        axs[1, i + 1].axis('off')
-
-                # Adjust spacing
-                plt.subplots_adjust(wspace=0.1, hspace=0.2)
-
-                # Save the figure
-                output_path = os.path.join(
-                    base_image_paths['evaluation'],
-                    f'visual_comparison_{algorithm}_{watermark_type}_{channel}.png'
-                )
-                plt.savefig(output_path, dpi=300, bbox_inches='tight')
-                plt.close()
-
-                print(f"Visual comparison saved to {output_path}")
 
 
 def main() -> None:
@@ -1417,11 +1794,11 @@ def main() -> None:
     base_image_paths = create_directory_structure()
 
     # Process host image
-    host_image = process_host_image(base_image_paths)
+    host_image, gray_scale_host_image = process_host_image(base_image_paths)
 
     # Process and embed watermarks
     binary_watermark, pseudo_random_image, fixed_locations, random_locations_sutech, random_locations_random = (
-        process_watermarks(base_image_paths, host_image)
+        process_watermarks(base_image_paths, host_image, is_gray_scale=False)
     )
 
     # Extract watermarks
@@ -1438,7 +1815,31 @@ def main() -> None:
     # Evaluate watermarks
     evaluate_watermarks(base_image_paths, binary_watermark, pseudo_random_image)
     evaluate_host_image(base_image_paths, host_image)
-    print(50 * "-", "\n\033[91mDigital Watermarking Process Completed Successfully!\033[0m")
+
+    print(50 * "-", "\n\033[91m [RGB] Digital Watermarking Process Completed Successfully!\033[0m")
+
+    # Process and embed watermarks
+    binary_watermark, pseudo_random_image, fixed_locations, random_locations_sutech, random_locations_random = (
+        process_watermarks(base_image_paths, gray_scale_host_image, is_gray_scale=True)
+    )
+
+    # Extract watermarks
+    extract_watermarks(
+        base_image_paths,
+        gray_scale_host_image,
+        binary_watermark,
+        pseudo_random_image,
+        fixed_locations,
+        random_locations_sutech,
+        random_locations_random,
+        is_gray_scale=True
+    )
+
+    # Evaluate watermarks
+    evaluate_watermarks(base_image_paths, binary_watermark, pseudo_random_image, is_gray_scale=True)
+    evaluate_host_image(base_image_paths, gray_scale_host_image, is_gray_scale=True)
+
+    print(50 * "-", "\n\033[91m [GRAY SCALE] Digital Watermarking Process Completed Successfully!\033[0m")
 
 
 if __name__ == "__main__":
